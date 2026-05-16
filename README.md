@@ -20,7 +20,7 @@ Open the command palette and run **Open 3D graph view**. The graph toolbar inclu
 Download `main.js`, `manifest.json`, and `styles.css` from a release and copy them into:
 
 ```text
-<vault>/.obsidian/plugins/3d-graph-view/
+<vault>/.obsidian/plugins/three-d-graph-view/
 ```
 
 Then enable **3D Graph View** in Obsidian's community plugin settings.

@@ -1,9 +1,9 @@
 {
-  "id": "3d-graph-view",
+  "id": "three-d-graph-view",
   "name": "3D Graph View",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "minAppVersion": "1.5.0",
-  "description": "A graph-style Obsidian view that can be rotated in 3D space.",
+  "description": "A graph-style view that can be rotated in 3D space.",
   "author": "Steve",
   "authorUrl": "",
   "isDesktopOnly": false
