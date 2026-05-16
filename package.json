@@ -1,7 +1,7 @@
 {
-  "name": "obsidian-3d-graph-view",
-  "version": "0.1.1",
-  "description": "An Obsidian plugin that renders a rotatable 3D graph view.",
+  "name": "obsidian-three-d-graph-view",
+  "version": "0.1.2",
+  "description": "A graph-style view that can be rotated in 3D space.",
   "main": "main.js",
   "scripts": {
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",

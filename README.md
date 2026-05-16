@@ -1,6 +1,6 @@
-# 3D Graph View
+# Three D Graph View
 
-3D Graph View is an Obsidian plugin that adds a rotatable, graph-style view for exploring notes, links, backlinks, tags, and vault growth over time.
+Three D Graph View is an Obsidian plugin that adds a rotatable, graph-style view for exploring notes, links, backlinks, tags, and vault growth over time.
 
 ## Features
 
@@ -23,7 +23,7 @@ Download `main.js`, `manifest.json`, and `styles.css` from a release and copy th
 <vault>/.obsidian/plugins/three-d-graph-view/
 ```
 
-Then enable **3D Graph View** in Obsidian's community plugin settings.
+Then enable **Three D Graph View** in Obsidian's community plugin settings.
 
 ## Development
 
