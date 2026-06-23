@@ -214,15 +214,10 @@ export default class Graph3DPlugin extends Plugin {
     );
   }
 
-  onunload(): void {
-    this.app.workspace.detachLeavesOfType(VIEW_TYPE_3D_GRAPH);
-  }
-
   async activateView(): Promise<void> {
     const existingLeaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_3D_GRAPH)[0];
 
     if (existingLeaf) {
-      this.app.workspace.revealLeaf(existingLeaf);
       return;
     }
 
@@ -231,7 +226,6 @@ export default class Graph3DPlugin extends Plugin {
       type: VIEW_TYPE_3D_GRAPH,
       active: true
     });
-    this.app.workspace.revealLeaf(leaf);
   }
 
   async saveSettings(): Promise<void> {
