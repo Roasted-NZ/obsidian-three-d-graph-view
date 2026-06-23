@@ -51,6 +51,8 @@ interface Graph3DSettings {
   includeTags: boolean;
   enabledTags: Record<string, boolean>;
   tagColors: Record<string, string>;
+  folderColors: Record<string, string>;
+  rotateSpeedPercent: number;
   constrainToSphere: boolean;
   sphereStrength: number;
 }
@@ -65,6 +67,8 @@ const DEFAULT_SETTINGS: Graph3DSettings = {
   includeTags: true,
   enabledTags: {},
   tagColors: {},
+  folderColors: {},
+  rotateSpeedPercent: 0,
   constrainToSphere: true,
   sphereStrength: 0.08
 };
@@ -80,10 +84,22 @@ const DEFAULT_TAG_COLORS = [
   "#718096"
 ];
 
+const DEFAULT_FOLDER_COLORS = [
+  "#2f855a",
+  "#2b6cb0",
+  "#b7791f",
+  "#6b46c1",
+  "#c05621",
+  "#2c7a7b",
+  "#b83280",
+  "#4a5568"
+];
+
 interface GraphNode {
   id: string;
   name: string;
   path: string;
+  folderPath?: string;
   exists: boolean;
   kind: "note" | "tag";
   createdTime: number;
@@ -117,6 +133,7 @@ interface GraphComponent {
 
 export default class Graph3DPlugin extends Plugin {
   settings: Graph3DSettings;
+  activeFilePath?: string;
 
   async onload(): Promise<void> {
     const savedSettings = await this.loadData();
@@ -130,9 +147,15 @@ export default class Graph3DPlugin extends Plugin {
       tagColors: {
         ...DEFAULT_SETTINGS.tagColors,
         ...savedSettings?.tagColors
+      },
+      folderColors: {
+        ...DEFAULT_SETTINGS.folderColors,
+        ...savedSettings?.folderColors
       }
     };
     this.syncTagSettings();
+    this.syncFolderSettings();
+    this.activeFilePath = getActiveMarkdownFilePath(this.app);
 
     this.registerView(
       VIEW_TYPE_3D_GRAPH,
@@ -163,14 +186,31 @@ export default class Graph3DPlugin extends Plugin {
     this.registerEvent(
       this.app.metadataCache.on("changed", () => {
         this.syncTagSettings();
+        this.syncFolderSettings();
         this.refreshOpenViews();
       })
     );
     this.registerEvent(
-      this.app.vault.on("rename", () => this.refreshOpenViews())
+      this.app.workspace.on("file-open", (file) => {
+        if (file instanceof TFile && file.extension === "md") {
+          this.activeFilePath = file.path;
+        } else {
+          this.activeFilePath = getActiveMarkdownFilePath(this.app);
+        }
+        this.updateOpenViewActiveFiles();
+      })
     );
     this.registerEvent(
-      this.app.vault.on("delete", () => this.refreshOpenViews())
+      this.app.vault.on("rename", () => {
+        this.syncFolderSettings();
+        this.refreshOpenViews();
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on("delete", () => {
+        this.syncFolderSettings();
+        this.refreshOpenViews();
+      })
     );
   }
 
@@ -222,11 +262,31 @@ export default class Graph3DPlugin extends Plugin {
     return tags;
   }
 
+  syncFolderSettings(): string[] {
+    const folders = getVaultMarkdownFolders(this.app);
+
+    if (!this.settings.folderColors) {
+      this.settings.folderColors = {};
+      this.saveData(this.settings);
+    }
+
+    return folders;
+  }
+
   refreshOpenViews(): void {
     for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_3D_GRAPH)) {
       const view = leaf.view;
       if (view instanceof Graph3DView) {
         view.refresh();
+      }
+    }
+  }
+
+  updateOpenViewActiveFiles(): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_3D_GRAPH)) {
+      const view = leaf.view;
+      if (view instanceof Graph3DView) {
+        view.syncActiveFilePath();
       }
     }
   }
@@ -262,14 +322,21 @@ class Graph3DView extends ItemView {
   private nodeByMesh = new Map<Mesh, GraphNode>();
   private linkLines?: LineSegments;
   private labels: Sprite[] = [];
+  private activeSonar?: Sprite;
+  private activeSonarTexture?: Texture;
   private labelTextures: Texture[] = [];
   private nodeTextures: Texture[] = [];
   private raycaster = new Raycaster();
   private pointer = new Vector2();
+  private graphCenter = new Vector3();
   private hoveredNodeId?: string;
   private hoverNeighbors = new Set<string>();
+  private activeFilePath?: string;
   private graphData?: GraphData;
   private timelapseButton?: HTMLButtonElement;
+  private rotateSpeedValue?: HTMLSpanElement;
+  private lastFrameTime = 0;
+  private resizeFitTimer?: number;
   private timelapseTimer?: number;
   private isTimelapseRunning = false;
   private timelapseNodeIds: string[] = [];
@@ -328,6 +395,36 @@ class Graph3DView extends ItemView {
     });
     this.timelapseButton.addEventListener("click", () => this.toggleTimelapse());
 
+    const rotateControl = toolbar.createDiv("graph-3d-rotate-control");
+    rotateControl.createSpan({
+      cls: "graph-3d-rotate-label",
+      text: "Rotate"
+    });
+    const rotateSlider = rotateControl.createEl("input", {
+      attr: {
+        "aria-label": "Auto rotate speed",
+        type: "range",
+        min: "0",
+        max: "100",
+        step: "10"
+      }
+    });
+    rotateSlider.value = String(this.plugin.settings.rotateSpeedPercent);
+    this.rotateSpeedValue = rotateControl.createSpan({
+      cls: "graph-3d-rotate-value",
+      text: `${this.plugin.settings.rotateSpeedPercent}%`
+    });
+    rotateSlider.addEventListener("input", () => {
+      const value = Number(rotateSlider.value);
+      this.plugin.settings.rotateSpeedPercent = value;
+      if (this.rotateSpeedValue) {
+        this.rotateSpeedValue.textContent = `${value}%`;
+      }
+    });
+    rotateSlider.addEventListener("change", () => {
+      this.plugin.saveSettings();
+    });
+
     this.graphContainer = this.contentEl.createDiv("graph-3d-canvas");
 
     this.resizeObserver = new ResizeObserver(() => this.resizeGraph());
@@ -349,6 +446,11 @@ class Graph3DView extends ItemView {
     }
 
     this.renderGraph();
+  }
+
+  syncActiveFilePath(): void {
+    this.activeFilePath = this.plugin.activeFilePath ?? getActiveMarkdownFilePath(this.app);
+    this.focusActiveNode();
   }
 
   private renderGraph(): void {
@@ -373,7 +475,7 @@ class Graph3DView extends ItemView {
 
     this.createScene(graphData);
     this.resizeGraph();
-    window.setTimeout(() => this.zoomToFit(), 400);
+    window.setTimeout(() => this.focusActiveNode() || this.zoomToFit(), 400);
   }
 
   private disposeGraph(): void {
@@ -386,6 +488,11 @@ class Graph3DView extends ItemView {
 
     this.simulation?.stop();
     this.simulation = undefined;
+
+    if (this.resizeFitTimer !== undefined) {
+      window.clearTimeout(this.resizeFitTimer);
+      this.resizeFitTimer = undefined;
+    }
 
     this.controls?.dispose();
     this.controls = undefined;
@@ -404,8 +511,10 @@ class Graph3DView extends ItemView {
     this.hoveredNodeId = undefined;
     this.hoverNeighbors.clear();
     this.graphData = undefined;
+    this.graphCenter.set(0, 0, 0);
     this.timelapseNodeIds = [];
     this.revealedNodeIds.clear();
+    this.lastFrameTime = 0;
 
     if (this.linkLines) {
       this.linkLines.geometry.dispose();
@@ -427,6 +536,18 @@ class Graph3DView extends ItemView {
       }
     }
     this.labels = [];
+
+    if (this.activeSonar) {
+      const material = this.activeSonar.material;
+      if (Array.isArray(material)) {
+        material.forEach((item) => item.dispose());
+      } else {
+        material.dispose();
+      }
+      this.activeSonar = undefined;
+    }
+    this.activeSonarTexture?.dispose();
+    this.activeSonarTexture = undefined;
 
     for (const texture of this.labelTextures) {
       texture.dispose();
@@ -456,6 +577,7 @@ class Graph3DView extends ItemView {
     }
 
     this.graphData = graphData;
+    this.syncActiveFilePath();
 
     const styles = getComputedStyle(document.body);
     const backgroundColor = styles.getPropertyValue("--background-primary").trim() || "#000000";
@@ -483,23 +605,22 @@ class Graph3DView extends ItemView {
     this.scene.add(new AmbientLight(0xffffff, 1));
 
     const nodeGeometry = new SphereGeometry(1, 24, 24);
-    const existingMaterial = this.createNodeMaterial(nodeColor);
     const unresolvedMaterial = this.createNodeMaterial(unresolvedNodeColor, {
       transparent: true,
       opacity: 0.78
     });
 
     for (const node of graphData.nodes) {
-      const material = node.kind === "tag"
-        ? this.createNodeMaterial(getTagColor(node.name, this.plugin.settings))
-        : node.exists
-          ? existingMaterial.clone()
-          : unresolvedMaterial.clone();
+      const baseColor = getNodeBaseColor(node, this.plugin.settings, nodeColor, unresolvedNodeColor);
+      const material = node.exists
+        ? this.createNodeMaterial(baseColor)
+        : unresolvedMaterial.clone();
       const mesh = new Mesh(nodeGeometry, material);
       const radius = Math.max(3, Math.sqrt(node.val) * this.plugin.settings.nodeSize);
       mesh.scale.setScalar(radius);
       mesh.userData.baseRadius = radius;
       mesh.userData.nodeId = node.id;
+      mesh.userData.baseNodeColor = baseColor;
       this.scene.add(mesh);
       this.nodeMeshes.push(mesh);
       this.nodeByMesh.set(mesh, node);
@@ -526,6 +647,9 @@ class Graph3DView extends ItemView {
     );
     this.scene.add(this.linkLines);
 
+    this.activeSonar = this.createSonarSprite();
+    this.scene.add(this.activeSonar);
+
     this.renderer.domElement.addEventListener("click", this.handleCanvasClick);
     this.renderer.domElement.addEventListener("mousemove", this.handleCanvasMove);
     this.renderer.domElement.addEventListener("mouseleave", this.handleCanvasLeave);
@@ -545,6 +669,7 @@ class Graph3DView extends ItemView {
       .force("center", forceCenter(0, 0, 0))
       .on("tick", () => this.syncGraphObjects(graphData));
 
+    this.lastFrameTime = performance.now();
     this.animate();
   }
 
@@ -587,6 +712,21 @@ class Graph3DView extends ItemView {
     return sprite;
   }
 
+  private createSonarSprite(): Sprite {
+    const texture = createSonarRingTexture();
+    this.activeSonarTexture = texture;
+
+    const sprite = new Sprite(new SpriteMaterial({
+      map: texture,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false
+    }));
+    sprite.renderOrder = 8;
+    sprite.visible = false;
+    return sprite;
+  }
+
   private syncGraphObjects(graphData: GraphData): void {
     const nodesById = new Map(graphData.nodes.map((node) => [node.id, node]));
 
@@ -609,6 +749,8 @@ class Graph3DView extends ItemView {
     if (this.linkLines) {
       updateLinkGeometry(this.linkLines.geometry, graphData.links, this.hoveredNodeId, this.hoverNeighbors, this.getVisibleNodeIds());
     }
+
+    this.updateGraphCenter();
   }
 
   private animate = (): void => {
@@ -616,8 +758,11 @@ class Graph3DView extends ItemView {
       return;
     }
 
+    this.rotateCameraAroundFocus();
     this.controls?.update();
     this.updateHoverPulse();
+    this.updateActiveFilePulse();
+    this.updateActiveSonar();
     this.renderer.render(this.scene, this.camera);
     this.animationFrame = window.requestAnimationFrame(this.animate);
   };
@@ -645,6 +790,149 @@ class Graph3DView extends ItemView {
         label.scale.set(baseScaleX, baseScaleY, 1);
       }
     }
+  }
+
+  private focusActiveNode(): boolean {
+    if (!this.camera || !this.controls || !this.graphData || !this.activeFilePath) {
+      return false;
+    }
+
+    const activeNode = this.getActiveGraphNode();
+    if (!activeNode) {
+      return false;
+    }
+
+    this.updateGraphCenter(false);
+    const focus = this.graphCenter.clone();
+    const activePosition = new Vector3(activeNode.x ?? 0, activeNode.y ?? 0, activeNode.z ?? 0);
+    const activeDirection = activePosition.clone().sub(focus);
+    const viewDirection = activeDirection.lengthSq() > 0.0001
+      ? activeDirection.normalize()
+      : new Vector3(0, 0, 1);
+    const distance = this.getViewportFitDistance();
+    this.controls.target.copy(focus);
+    this.camera.position.copy(focus).add(viewDirection.multiplyScalar(distance));
+    this.camera.lookAt(focus);
+    this.controls.update();
+    return true;
+  }
+
+  private updateGraphCenter(keepCameraOffset = true): void {
+    if (!this.graphData) {
+      return;
+    }
+
+    const nextCenter = getDenseGraphCenter(this.graphData.nodes, 0.9);
+    const delta = nextCenter.clone().sub(this.graphCenter);
+    this.graphCenter.copy(nextCenter);
+
+    if (!this.controls || !this.camera) {
+      return;
+    }
+
+    if (keepCameraOffset) {
+      this.camera.position.add(delta);
+    }
+
+    this.controls.target.copy(this.graphCenter);
+  }
+
+  private rotateCameraAroundFocus(): void {
+    if (!this.camera || !this.controls) {
+      return;
+    }
+
+    const now = performance.now();
+    const elapsedSeconds = this.lastFrameTime ? (now - this.lastFrameTime) / 1000 : 0;
+    this.lastFrameTime = now;
+
+    const speedPercent = Math.max(0, Math.min(100, this.plugin.settings.rotateSpeedPercent ?? 0));
+    if (speedPercent <= 0 || elapsedSeconds <= 0) {
+      return;
+    }
+
+    const fullSpeedRadiansPerSecond = (Math.PI * 4) / 60;
+    const angle = fullSpeedRadiansPerSecond * (speedPercent / 100) * elapsedSeconds;
+    const offset = this.camera.position.clone().sub(this.controls.target);
+    offset.applyAxisAngle(new Vector3(0, 1, 0), angle);
+    this.camera.position.copy(this.controls.target).add(offset);
+    this.camera.lookAt(this.controls.target);
+  }
+
+  private getActiveGraphNode(): GraphNode | undefined {
+    return this.graphData?.nodes.find((node) => node.kind === "note" && node.exists && node.path === this.activeFilePath);
+  }
+
+  private getActiveGraphMesh(): Mesh | undefined {
+    return this.nodeMeshes.find((mesh) => {
+      const node = this.nodeByMesh.get(mesh);
+      return node?.kind === "note" && node.exists && node.path === this.activeFilePath;
+    });
+  }
+
+  private updateActiveFilePulse(): void {
+    const visibleNodeIds = this.getVisibleNodeIds();
+    const hasHover = this.hoveredNodeId !== undefined;
+    const time = performance.now() / 1000;
+    const pulse = (Math.sin(time * 3.2) + 1) / 2;
+    const activeTint = new Color("#c8c8c8").lerp(new Color("#ffffff"), pulse);
+
+    for (const mesh of this.nodeMeshes) {
+      const material = mesh.material;
+      const node = this.nodeByMesh.get(mesh);
+      if (Array.isArray(material) || !node || !("color" in material) || !(material.color instanceof Color)) {
+        continue;
+      }
+
+      const nodeId = String(mesh.userData.nodeId);
+      const isVisible = !visibleNodeIds || visibleNodeIds.has(nodeId);
+      const isDirect = !hasHover || nodeId === this.hoveredNodeId || this.hoverNeighbors.has(nodeId);
+
+      if (!isVisible) {
+        continue;
+      }
+
+      if (!isDirect) {
+        material.color.set("#8a8a8a");
+      } else if (node.kind === "note" && node.exists && node.path === this.activeFilePath) {
+        material.color.copy(activeTint);
+      } else {
+        material.color.set("#ffffff");
+      }
+    }
+  }
+
+  private updateActiveSonar(): void {
+    if (!this.activeSonar || !this.activeFilePath) {
+      if (this.activeSonar) {
+        this.activeSonar.visible = false;
+      }
+      return;
+    }
+
+    const activeMesh = this.getActiveGraphMesh();
+    if (!activeMesh) {
+      this.activeSonar.visible = false;
+      return;
+    }
+
+    const material = this.activeSonar.material;
+    if (Array.isArray(material)) {
+      return;
+    }
+
+    const baseRadius = activeMesh.userData.baseRadius ?? 4;
+    const nodeDiameter = baseRadius * 2;
+    const time = performance.now() / 1000;
+    const cycle = (time * 0.62) % 1;
+    const scale = nodeDiameter * (1.15 + cycle * 3.85);
+
+    this.activeSonar.visible = true;
+    this.activeSonar.position.copy(activeMesh.position);
+    this.activeSonar.scale.set(scale, scale, 1);
+    material.opacity = Math.max(0, 0.42 * Math.pow(1 - cycle, 1.7));
+    material.color.set(activeMesh.userData.baseNodeColor ?? "#ffffff");
+    material.needsUpdate = true;
   }
 
   private handleCanvasClick = (event: MouseEvent): void => {
@@ -820,6 +1108,22 @@ class Graph3DView extends ItemView {
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height, false);
+    this.scheduleViewportRefit();
+  }
+
+  private scheduleViewportRefit(): void {
+    if (!this.graphData || !this.camera || !this.controls) {
+      return;
+    }
+
+    if (this.resizeFitTimer !== undefined) {
+      window.clearTimeout(this.resizeFitTimer);
+    }
+
+    this.resizeFitTimer = window.setTimeout(() => {
+      this.resizeFitTimer = undefined;
+      this.focusActiveNode() || this.zoomToFit();
+    }, 120);
   }
 
   private zoomToFit(): void {
@@ -827,10 +1131,29 @@ class Graph3DView extends ItemView {
       return;
     }
 
-    const radius = Math.max(160, Math.sqrt(this.nodeMeshes.length) * 42);
-    this.camera.position.set(0, 0, radius * 2.2);
-    this.controls.target.set(0, 0, 0);
+    this.updateGraphCenter(false);
+    const distance = this.getViewportFitDistance();
+    this.camera.position.set(this.graphCenter.x, this.graphCenter.y, this.graphCenter.z + distance);
+    this.controls.target.copy(this.graphCenter);
     this.controls.update();
+  }
+
+  private getViewportFitDistance(): number {
+    if (!this.camera || !this.graphContainer) {
+      return Math.max(140, Math.sqrt(this.nodeMeshes.length) * 44);
+    }
+
+    const bounds = this.graphData
+      ? getDenseGraphBounds(this.graphData.nodes, this.graphCenter, 0.9)
+      : { radius: Math.max(120, Math.sqrt(this.nodeMeshes.length) * 34), halfWidth: 120, halfHeight: 120 };
+    const verticalFov = this.camera.fov * Math.PI / 180;
+    const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * Math.max(0.1, this.camera.aspect));
+    const padding = 1.2;
+    const verticalDistance = bounds.halfHeight / Math.tan(verticalFov / 2);
+    const horizontalDistance = bounds.halfWidth / Math.tan(horizontalFov / 2);
+    const viewportDistance = Math.max(verticalDistance, horizontalDistance) * padding;
+
+    return Math.max(40, viewportDistance);
   }
 
   private async openNode(node: GraphNode): Promise<void> {
@@ -876,6 +1199,7 @@ function buildGraphData(app: App, settings: Graph3DSettings): GraphData {
       id: path,
       name,
       path,
+      folderPath: kind === "note" ? getFolderPath(path) : undefined,
       exists,
       kind,
       createdTime,
@@ -1069,6 +1393,83 @@ function getGraphSphereRadius(nodes: GraphNode[]): number {
   return Math.max(120, Math.sqrt(nodes.length) * 34);
 }
 
+function getDenseGraphCenter(nodes: GraphNode[], densityRatio: number): Vector3 {
+  const positionedNodes = getDenseGraphNodes(nodes, densityRatio);
+
+  if (positionedNodes.length === 0) {
+    return new Vector3();
+  }
+
+  const center = new Vector3();
+  for (const node of positionedNodes) {
+    center.add(new Vector3(node.x ?? 0, node.y ?? 0, node.z ?? 0));
+  }
+
+  return center.divideScalar(positionedNodes.length);
+}
+
+function getDenseGraphBounds(
+  nodes: GraphNode[],
+  center: Vector3,
+  densityRatio: number
+): { radius: number; halfWidth: number; halfHeight: number } {
+  const denseNodes = getDenseGraphNodes(nodes, densityRatio);
+
+  if (denseNodes.length === 0) {
+    return { radius: 120, halfWidth: 120, halfHeight: 120 };
+  }
+
+  let radius = 1;
+  let halfWidth = 1;
+  let halfHeight = 1;
+
+  for (const node of denseNodes) {
+    const x = node.x ?? 0;
+    const y = node.y ?? 0;
+    const z = node.z ?? 0;
+    const dx = x - center.x;
+    const dy = y - center.y;
+    const dz = z - center.z;
+    radius = Math.max(radius, Math.sqrt(dx * dx + dy * dy + dz * dz));
+    halfWidth = Math.max(halfWidth, Math.abs(dx));
+    halfHeight = Math.max(halfHeight, Math.abs(dy));
+  }
+
+  return {
+    radius: Math.max(32, radius),
+    halfWidth: Math.max(32, halfWidth),
+    halfHeight: Math.max(32, halfHeight)
+  };
+}
+
+function getDenseGraphNodes(nodes: GraphNode[], densityRatio: number): GraphNode[] {
+  const positionedNodes = nodes.filter((node) =>
+    Number.isFinite(node.x) && Number.isFinite(node.y) && Number.isFinite(node.z)
+  );
+
+  if (positionedNodes.length === 0) {
+    return [];
+  }
+
+  const roughCenter = new Vector3();
+  for (const node of positionedNodes) {
+    roughCenter.add(new Vector3(node.x ?? 0, node.y ?? 0, node.z ?? 0));
+  }
+  roughCenter.divideScalar(positionedNodes.length);
+
+  const keepCount = Math.max(1, Math.ceil(positionedNodes.length * Math.max(0.1, Math.min(1, densityRatio))));
+  const denseNodes = positionedNodes
+    .map((node) => ({
+      node,
+      distanceSquared: roughCenter.distanceToSquared(new Vector3(node.x ?? 0, node.y ?? 0, node.z ?? 0))
+    }))
+    .sort((a, b) => a.distanceSquared - b.distanceSquared)
+    .slice(0, keepCount)
+    .map((item) => item.node);
+
+  return denseNodes;
+}
+
 function seedNodePositions(nodes: GraphNode[], components: GraphComponent[], componentSpread: number): void {
   const radius = getGraphSphereRadius(nodes);
   const goldenAngle = Math.PI * (3 - Math.sqrt(5));
@@ -1239,6 +1640,35 @@ function createShadedNodeTexture(color: string): Texture {
   return texture;
 }
 
+function createSonarRingTexture(): Texture {
+  const canvas = document.createElement("canvas");
+  const size = 256;
+  canvas.width = size;
+  canvas.height = size;
+
+  const context = canvas.getContext("2d");
+  if (!context) {
+    const texture = new Texture(canvas);
+    texture.needsUpdate = true;
+    return texture;
+  }
+
+  const center = size / 2;
+  const gradient = context.createRadialGradient(center, center, 72, center, center, 118);
+  gradient.addColorStop(0, "rgba(255, 255, 255, 0)");
+  gradient.addColorStop(0.46, "rgba(255, 255, 255, 0)");
+  gradient.addColorStop(0.58, "rgba(255, 255, 255, 0.86)");
+  gradient.addColorStop(0.72, "rgba(255, 255, 255, 0.24)");
+  gradient.addColorStop(1, "rgba(255, 255, 255, 0)");
+
+  context.fillStyle = gradient;
+  context.fillRect(0, 0, size, size);
+
+  const texture = new Texture(canvas);
+  texture.needsUpdate = true;
+  return texture;
+}
+
 function drawSmallCapsLabel(
   context: CanvasRenderingContext2D,
   text: string,
@@ -1320,6 +1750,58 @@ function getTagColor(tag: string, settings: Graph3DSettings): string {
   }
 
   return DEFAULT_TAG_COLORS[getStableTagIndex(tag) % DEFAULT_TAG_COLORS.length];
+}
+
+function getNodeBaseColor(
+  node: GraphNode,
+  settings: Graph3DSettings,
+  defaultNoteColor: string,
+  unresolvedNodeColor: string
+): string {
+  if (node.kind === "tag") {
+    return getTagColor(node.name, settings);
+  }
+
+  if (!node.exists) {
+    return unresolvedNodeColor;
+  }
+
+  return getFolderColor(node.folderPath ?? getFolderPath(node.path), settings, defaultNoteColor);
+}
+
+function getFolderColor(folderPath: string, settings: Graph3DSettings, fallback: string): string {
+  const explicitColor = settings.folderColors?.[folderPath];
+  if (isHexColor(explicitColor)) {
+    return explicitColor;
+  }
+
+  const parentFolder = getParentFolderPath(folderPath);
+  if (parentFolder && isHexColor(settings.folderColors?.[parentFolder])) {
+    return muteColor(getFolderColor(parentFolder, settings, fallback));
+  }
+
+  if (folderPath === "/") {
+    return fallback;
+  }
+
+  return DEFAULT_FOLDER_COLORS[getStableTagIndex(folderPath) % DEFAULT_FOLDER_COLORS.length];
+}
+
+function getParentFolderPath(folderPath: string): string | null {
+  if (folderPath === "/") {
+    return null;
+  }
+
+  const slashIndex = folderPath.lastIndexOf("/");
+  if (slashIndex <= 0) {
+    return "/";
+  }
+
+  return folderPath.substring(0, slashIndex);
+}
+
+function getFolderDisplayName(folderPath: string): string {
+  return folderPath === "/" ? "Vault root" : folderPath;
 }
 
 function getParentTag(tag: string): string | null {
@@ -1479,6 +1961,44 @@ function getVaultTags(app: App): string[] {
   return Array.from(tags).sort((a, b) => a.localeCompare(b));
 }
 
+function getVaultMarkdownFolders(app: App): string[] {
+  const folders = new Set<string>();
+
+  for (const file of app.vault.getMarkdownFiles()) {
+    let folderPath = getFolderPath(file.path);
+    folders.add(folderPath);
+
+    while (folderPath !== "/") {
+      const parentFolder = getParentFolderPath(folderPath);
+      if (!parentFolder) {
+        break;
+      }
+      folders.add(parentFolder);
+      folderPath = parentFolder;
+    }
+  }
+
+  return Array.from(folders).sort((a, b) => {
+    if (a === "/") {
+      return -1;
+    }
+    if (b === "/") {
+      return 1;
+    }
+    return a.localeCompare(b);
+  });
+}
+
+function getFolderPath(filePath: string): string {
+  const slashIndex = filePath.lastIndexOf("/");
+  return slashIndex === -1 ? "/" : filePath.substring(0, slashIndex);
+}
+
+function getActiveMarkdownFilePath(app: App): string | undefined {
+  const activeFile = app.workspace.getActiveFile();
+  return activeFile instanceof TFile && activeFile.extension === "md" ? activeFile.path : undefined;
+}
+
 class Graph3DSettingTab extends PluginSettingTab {
   constructor(app: App, private plugin: Graph3DPlugin) {
     super(app, plugin);
@@ -1507,6 +2027,35 @@ class Graph3DSettingTab extends PluginSettingTab {
           this.plugin.settings.includeUnresolvedLinks = value;
           await this.plugin.saveSettings();
         }));
+
+    const folders = this.plugin.syncFolderSettings();
+    new Setting(containerEl)
+      .setName("Folder group colours")
+      .setDesc("Colour note bubbles by the folder that contains each markdown file.");
+
+    const folderList = containerEl.createDiv("graph-3d-folder-settings");
+    if (folders.length === 0) {
+      folderList.createDiv({
+        cls: "graph-3d-folder-empty",
+        text: "No markdown folders found."
+      });
+    } else {
+      for (const folder of folders) {
+        const parentFolder = getParentFolderPath(folder);
+        new Setting(folderList)
+          .setName(getFolderDisplayName(folder))
+          .setDesc(parentFolder && isHexColor(this.plugin.settings.folderColors[parentFolder]) && !this.plugin.settings.folderColors[folder]
+            ? `Default: muted ${getFolderDisplayName(parentFolder)}`
+            : "Markdown file group colour")
+          .addColorPicker((color) => color
+            .setValue(getFolderColor(folder, this.plugin.settings, "#7c6df2"))
+            .onChange(async (value) => {
+              this.plugin.settings.folderColors[folder] = value;
+              await this.plugin.saveSettings();
+              this.display();
+            }));
+      }
+    }
 
     new Setting(containerEl)
       .setName("Include tags")

@@ -1,6 +1,6 @@
 {
   "name": "obsidian-three-d-graph-view",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "A graph-style view that can be rotated in 3D space.",
   "main": "main.js",
   "scripts": {
@@ -13,7 +13,7 @@
     "graph",
     "3d"
   ],
-  "author": "Steve",
+  "author": "Sidepath Studio",
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^20.11.30",
