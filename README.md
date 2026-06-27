@@ -83,6 +83,12 @@ npm run build
 
 Three D Graph View is built by Sidepath Studio - small apps, practical tools, and digital experiments.
 
+## Support
+
+If Three D Graph View is useful in your vault, you can support Sidepath Studio here:
+
+[Buy me a coffee](https://buymeacoffee.com/sidepath)
+
 ## License
 
 MIT
